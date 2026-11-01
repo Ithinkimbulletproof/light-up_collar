@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Установить pytest и mpy-cross
+        run: pip install pytest==9.2.0 mpy-cross==1.29.0.post2
+      - name: Тесты логики
+        run: python -m pytest firmware/tests -q
+      - name: Сборка под MicroPython 1.29
+        run: |
+          for f in firmware/*.py firmware/bringup/*.py; do
+            mpy-cross -o /dev/null "$f"
+            echo "OK  $f"
+          done
