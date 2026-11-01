@@ -6,5 +6,3 @@ __pycache__/
 settings.json
 .vscode/
 .idea/
-.claude/
-CLAUDE.md
