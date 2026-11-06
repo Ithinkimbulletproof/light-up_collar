@@ -182,6 +182,195 @@ def test_level_hint_waits_for_brightness_to_settle(tmp_path):
     assert g < 50  # потом мигаем
 
 
+def run_strip(a, out, t0, frames, cap=config.CAP_MA):
+    """Кадры App → leds.Output с реальным потолком и током сцены, как в main.py."""
+    seen = []
+    for k in range(frames):
+        f, b, g = a.render(t0 + k * 25)
+        seen.append(bytes(out.step(f, b, g, cap, 25, a.ref_ma)))
+    return seen
+
+
+@pytest.mark.parametrize("level", range(LEVELS))
+def test_wipe_does_not_brighten_unreached_pixels(tmp_path, level):
+    # Белый → красный: пока перекраска не дошла до последнего пикселя, он не должен разгораться
+    # (раньше масштаб считался от кадра анимации и белый «вспухал» почти втрое).
+    import leds
+
+    a = make(tmp_path)
+    a.s.palette, a.s.level = 7, level
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    before = out.out[3 * (N - 1) + 1]
+    a.on_button(button.SINGLE, 4000)
+    frames = run_strip(a, out, 4000, config.COLOR_WIPE_MS // 25 - 1)
+    assert max(f[3 * (N - 1) + 1] for f in frames) <= before + 1
+
+
+def test_lighter_colour_brightens_gradually_after_wipe(tmp_path):
+    # После перекраски белого в красный масштаб растёт (красному можно ярче) — плавно, а не скачком.
+    import leds
+
+    a = make(tmp_path)
+    a.s.palette = 7
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    a.on_button(button.SINGLE, 4000)
+    frames = run_strip(a, out, 4000, 60)
+    assert max(frames[-1]) > 2 * max(frames[0])  # красный в итоге заметно ярче урезанного белого
+    for prev, cur in zip(frames, frames[1:]):
+        assert max(c - p for c, p in zip(cur, prev)) <= 255 * 25 // config.TRANSITION_MS + 2
+
+
+@pytest.mark.parametrize("palette", [3, 5, 6])  # зелёный → голубой, синий → фиолетовый, фиолетовый → белый
+def test_heavier_colour_dims_unreached_pixels_gradually(tmp_path, palette):
+    # Новый цвет тяжелее, масштаб падает: лента впереди перекраски темнеет плавно, а не за пару кадров.
+    import leds
+
+    a = make(tmp_path)
+    a.s.palette = palette
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    before = max(out.out[3 * (N - 1) :])
+    a.on_button(button.SINGLE, 4000)
+    frames = run_strip(a, out, 4000, config.COLOR_WIPE_MS // 25 - 1)
+    series = [before] + [max(f[3 * (N - 1) :]) for f in frames]
+    assert max(x - y for x, y in zip(series, series[1:])) <= 7
+
+
+def test_scene_current_during_wipe_is_the_heavier_colour(tmp_path):
+    import leds
+
+    white = leds.leds_ma(bytes(config.PALETTE[7]) * N)
+    for palette in (6, 7):  # фиолетовый → белый и белый → красный
+        a = make(tmp_path)
+        a.s.palette = palette
+        a.render(3000)
+        a.on_button(button.SINGLE, 3000)
+        a.render(3100)
+        assert a.ref_ma == white
+        a.render(3000 + config.COLOR_WIPE_MS + 25)
+        assert a.ref_ma is None
+
+
+@pytest.mark.parametrize("gap", [420, 450, 475])
+def test_second_press_mid_wipe_keeps_unreached_pixels_flat(tmp_path, gap):
+    # Быстрые нажатия подряд: белый хвост, до которого не дошла первая перекраска, не разгорается.
+    import leds
+
+    a = make(tmp_path)
+    a.s.palette = 7
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    last = 3 * (N - 1) + 1
+    before = out.out[last]
+    a.on_button(button.SINGLE, 4000)
+    frames = run_strip(a, out, 4000, gap // 25)
+    t = 4000 + gap // 25 * 25
+    a.on_button(button.SINGLE, t)
+    frames += run_strip(a, out, t, config.COLOR_WIPE_MS // 25 - 2)
+    assert max(f[last] for f in frames) <= before + 1
+
+
+@pytest.mark.parametrize("before", range(LEVELS))
+def test_level_change_takes_transition_ms(tmp_path, before):
+    # Смена уровня идёт ~0,35 с на любом шаге: даже самый маленький шаг 10 → 35 % не делается за 0,1 с.
+    import leds
+
+    after = (before + 1) % LEVELS
+    target = make(tmp_path)
+    target.s.level = after
+    steady = leds.Output()
+    run_strip(target, steady, 0, 160)
+    final = max(steady.out[:3])
+
+    a = make(tmp_path)
+    a.s.level = before
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    start = max(out.out[:3])
+    a.on_button(button.DOUBLE, 4000)
+    series = [max(f[:3]) for f in run_strip(a, out, 4000, config.TRANSITION_MS // 25)]
+    close = next(k for k, v in enumerate(series) if abs(v - final) <= abs(final - start) // 10)
+    assert close * 25 >= 250
+
+
+@pytest.mark.parametrize("palette", [7, 4])
+@pytest.mark.parametrize("level", [0, 1])
+@pytest.mark.parametrize("dismiss", [False, True])
+def test_no_overshoot_when_charge_display_ends(tmp_path, palette, level, dismiss):
+    # После шкалы цвет возвращается плавно: ни один канал не выше, чем был в шкале и будет потом.
+    import leds
+
+    a = make(tmp_path)
+    a.s.palette, a.s.level = palette, level
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    steady = bytes(out.out)
+    hold(a, 4000 - config.LONG_PRESS_MS)
+    bar = run_strip(a, out, 4000, 80)[-1]
+    end = 6000
+    if dismiss:
+        a.on_button(button.PRESS, end)
+    else:
+        end = 4000 + config.CHARGE_DISPLAY_MS
+        run_strip(a, out, 6000, (end - 6000) // 25)
+    frames = run_strip(a, out, end, 40)
+    for c in range(3 * N):
+        assert max(f[c] for f in frames) <= max(bar[c], steady[c]) + 2
+
+
+def test_colour_returns_gradually_after_charge_display(tmp_path):
+    # Пиксель, погашенный в шкале, разгорается плавно, а не за один-два кадра.
+    import leds
+
+    a = make(tmp_path)
+    a.s.palette, a.s.level = 7, 1
+    out = leds.Output()
+    run_strip(a, out, 0, 160)
+    hold(a, 4000 - config.LONG_PRESS_MS)
+    run_strip(a, out, 4000, 80)
+    last = 3 * (N - 1) + 1
+    assert out.out[last] == 0
+    a.on_button(button.PRESS, 6000)
+    series = [0] + [f[last] for f in run_strip(a, out, 6000, 30)]
+    assert max(y - x for x, y in zip(series, series[1:])) <= 7
+
+
+@pytest.mark.parametrize("level", [0, 1])
+def test_no_overshoot_after_low_flash(tmp_path, level):
+    # Белый после красной вспышки «низкий заряд» не вспыхивает выше своей обычной яркости.
+    import leds
+
+    a = make(tmp_path, mv=config.V_LOW_MV - 120)
+    t = 2000
+    while not a.mon.low:
+        a.mon.update(config.V_LOW_MV - 120, FIXED, t)
+        t += 250
+    a.s.palette, a.s.level = 7, level
+    out = leds.Output()
+    flash = 30_000 // 25  # первая вспышка — при включении, смотрим вторую, на установившемся свете
+    frames = run_strip(a, out, t, flash + 60, cap=config.LOW_CAP_MA)
+    steady = frames[flash - 10][1]
+    assert steady > 0
+    assert max(f[1] for f in frames[flash + modes.LOW_FLASH_MS // 25 :]) <= steady + 2
+
+
+def test_charge_bar_fill_without_flare(tmp_path):
+    # Шкала бежит при пониженном потолке и тусклом уровне: первые пиксели не вспыхивают выше,
+    # чем горят, когда шкала добежала.
+    import leds
+
+    a = make(tmp_path)
+    a.s.level = 0
+    out = leds.Output()
+    run_strip(a, out, 0, 160, cap=config.LOW_CAP_MA)
+    hold(a, 4000 - config.LONG_PRESS_MS)
+    frames = run_strip(a, out, 4000, 80, cap=config.LOW_CAP_MA)
+    settled = max(frames[-1])
+    assert max(max(f) for f in frames) <= settled + 1
+
+
 # --- заряд: удержание ---
 
 

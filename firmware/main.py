@@ -122,7 +122,7 @@ def run():
                 t_frame = now
                 t0 = time.ticks_us()
                 frame, bright, gain = a.render(now)
-                out.step(frame, bright, gain, cap.cap, min(dt, 100))
+                out.step(frame, bright, gain, cap.cap, min(dt, 100), a.ref_ma)
                 if a.strip_powered:
                     out.write()
                     strip_was_on = True

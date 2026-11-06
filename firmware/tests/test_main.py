@@ -240,3 +240,16 @@ def test_adc_always_failing_keeps_strip_dark(monkeypatch, tmp_path):
     monkeypatch.setattr(sys.modules[__name__], "fake_machine", lambda b: m)
     b = boot(monkeypatch, tmp_path, board, seconds=5)
     assert all(not lit(f) for f in b.strip.writes)
+
+
+def test_main_passes_scene_current_to_output(monkeypatch, tmp_path):
+    # Без тока сцены белый хвост разгорался бы, пока перекраска до него не дошла.
+    (tmp_path / "settings.json").write_text('{"palette": 7, "level": 2}')
+    board = Board(mv=3900, pressed=lambda t: 5000 <= t < 5060)
+    b = boot(monkeypatch, tmp_path, board, seconds=7)
+    w = b.strip.writes
+    last = 3 * (config.NUM_LEDS - 1)
+    i = 5000 // 26  # заведомо до нажатия
+    base = w[i][last]
+    during = [f[last] for f in w[i:]][: 860 // 26]  # перекраска идёт примерно с 5,41 до 5,91 с
+    assert base > 0 and max(during) <= base + 1

@@ -17,37 +17,49 @@ from settings import Settings
 
 DT = 1000 // config.FPS
 MIN_GAP_MS = 333
+CAP = [10_000]  # потолок текущего прогона, см. фикстуру cap_ma
 FIXED = config.NUM_LEDS * config.MA_IDLE_PER_LED + config.I_ESP_MA
 
 
-def flash_onsets(series):
+def flash_onsets(series, threshold=128):
     onsets = []
     armed = True
     lo = hi = series[0]
     for k, v in enumerate(series):
         if armed:
             lo = min(lo, v)
-            if v - lo >= 128:
+            if v - lo >= threshold:
                 onsets.append(k * DT)
                 armed = False
                 hi = v
         else:
             hi = max(hi, v)
-            if hi - v >= 128:
+            if hi - v >= threshold:
                 armed = True
                 lo = v
     return onsets
 
 
-def run(tmp_path, seconds, inputs, mv=3900, cap_ma=10_000, palette=0):
-    """inputs(app, now, frame_no) — что происходит на этом кадре. cap_ma большой, чтобы не маскировать мигание."""
+@pytest.fixture(autouse=True, params=[10_000, config.CAP_MA, config.LOW_CAP_MA])
+def cap_ma(request):
+    """Каждый сценарий — на реальных потолках и на большом: он не маскирует мигание, но отключает масштаб."""
+    CAP[0] = request.param
+
+
+def run(tmp_path, seconds, inputs, mv=3900, palette=0, level=None):
+    """inputs(app, now, frame_no) — что происходит на этом кадре."""
+    cap_ma = CAP[0]
     s = Settings(str(tmp_path / "s.json"))
     s.palette = palette
     mon = battery.Monitor()
     cap = battery.CapController()
     for k in range(battery.STARTUP_SAMPLES):
         mon.update(mv, FIXED, k * 250)
-    app = App(s, mon, cap, brightness=100)
+    if level is None:
+        app = App(s, mon, cap, brightness=100)
+    else:
+        s.level = level
+        app = App(s, mon, cap)
     out = leds.Output()
     frames = []
     t0 = battery.STARTUP_SAMPLES * 250
@@ -57,7 +69,7 @@ def run(tmp_path, seconds, inputs, mv=3900, cap_ma=10_000, palette=0):
             mon.update(mv, out.est_ma, now)
         inputs(app, now, k)
         f, b, g = app.render(now)
-        frames.append(bytes(out.step(f, b, g, cap_ma, DT)))
+        frames.append(bytes(out.step(f, b, g, cap_ma, DT, app.ref_ma)))
     return frames
 
 
@@ -78,7 +90,7 @@ def run_levels(tmp_path, seconds, inputs):
             mon.update(3900, out.est_ma, now)
         inputs(app, now, k)
         f, b, g = app.render(now)
-        frames.append(bytes(out.step(f, b, g, 10_000, DT)))
+        frames.append(bytes(out.step(f, b, g, CAP[0], DT, app.ref_ma)))
     return frames
 
 
@@ -96,6 +108,17 @@ def worst_gap(frames):
 def assert_no_fast_flashing(frames):
     gap = worst_gap(frames)
     assert gap is None or gap >= MIN_GAP_MS, "вспышки через {} мс".format(gap)
+
+
+def worst_gap_relative(frames):
+    """То же, но вспышка — рост на половину максимума самого канала: на урезанных цветах 128 недостижимо."""
+    worst = None
+    for ch in range(len(frames[0])):
+        series = [f[ch] for f in frames]
+        onsets = flash_onsets(series, max(max(series) // 2, 6))
+        for a, b in zip(onsets, onsets[1:]):
+            worst = b - a if worst is None else min(worst, b - a)
+    return worst
 
 
 def nothing(app, now, k):
@@ -152,6 +175,36 @@ def test_charge_display_toggling(tmp_path):
 @pytest.mark.parametrize("palette", [0, 5, 7])
 def test_low_flash_over_light(tmp_path, palette):
     assert_no_fast_flashing(run(tmp_path, 70, nothing, mv=config.V_LOW_MV - 80, palette=palette))
+
+
+def press_single(app, now, k):
+    if k % 18 == 0:  # быстрее не нажать: нажатие и окно двойного
+        app.on_button(button.SINGLE, now)
+
+
+def press_double(app, now, k):
+    # Обычная быстрая серия. Если жать без остановки чаще раза в ~0,7 с (предел кнопки ~0,52 с), подсказка обрывается,
+    # и при потолке 300 мА этот детектор показывает 175–325 мс на всплесках до ~80 единиц из 255 (после первого цикла
+    # до ~40), при 700 мА — 275–325 мс на ~45; правило на 128 чисто.
+    if k % 28 == 0:
+        app.on_button(button.DOUBLE, now)
+
+
+def press_charge(app, now, k):
+    if k % 70 == 0:  # удержание 1,5 с и короткое нажатие
+        app.on_button(button.LONG, now)
+    elif k % 70 == 66:
+        app.on_button(button.PRESS, now)
+
+
+@pytest.mark.parametrize("gesture", [press_single, press_double, press_charge])
+@pytest.mark.parametrize("palette", [0, 3, 6, 7])
+@pytest.mark.parametrize("level", range(len(config.BRIGHTNESS_LEVELS)))
+def test_gestures_at_hand_speed_relative(tmp_path, gesture, palette, level):
+    # С порогом от самого канала; нажатия — с той частотой, какую может дать рука.
+    frames = run(tmp_path, 10, gesture, palette=palette, level=level)
+    gap = worst_gap_relative(frames[80:])
+    assert gap is None or gap >= MIN_GAP_MS, "вспышки через {} мс".format(gap)
 
 
 def test_detector_catches_real_flicker():

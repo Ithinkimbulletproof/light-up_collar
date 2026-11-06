@@ -132,7 +132,7 @@ def simulate(name, presses, captions, duration_ms, skip_ms=0, palette=0, level=N
             dt = now - t_frame
             t_frame = now
             frame, bright, gain = a.render(now)
-            rgb = out.step(frame, bright, gain, cap.cap, dt)
+            rgb = out.step(frame, bright, gain, cap.cap, dt, a.ref_ma)
             if rel is not None and rel >= skip_ms:
                 caption = ""
                 for t0, text in captions:
