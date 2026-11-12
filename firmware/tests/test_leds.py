@@ -76,13 +76,17 @@ def test_brightness_is_share_of_capped_max(rgb):
 
 def test_levels_differ_on_white():
     white = bytes((255,)) * (3 * N)
-    seen = [max(run(leds.Output(), white, 100, brightness=b)) for b in config.BRIGHTNESS_LEVELS]
+    seen = []
+    for b in config.BRIGHTNESS_LEVELS:
+        out = leds.Output()
+        seen.append(max(run(out, white, 100, brightness=b)))
+        assert out.k == 256  # белый урезан масштабом, а не страховочным потолком
     assert seen == sorted(seen) and len(set(seen)) == len(seen)
 
 
 def test_cap_holds_while_color_changes():
-    # Красный на 100 % почти влезает в потолок, белый — нет: пока плавность переводит один в другой,
-    # сумма каналов на полпути больше обоих — второй, страховочный потолок должен это поймать.
+    # Красный на 100 % (~370 мА) влезает в потолок с большим запасом, а белому нужно ~1 А. Пока плавность и масштаб
+    # переводят красный в белый, кадр ненадолго выходит за потолок — второй, страховочный потолок должен это поймать.
     out = leds.Output()
     run(out, bytes((255, 0, 0)) * N, 100)
     for frame in (bytes((255,)) * (3 * N), bytes((0, 0, 255)) * N, bytes((255, 170, 0)) * N):
@@ -120,7 +124,7 @@ def test_low_cap_keeps_levels_that_fit(rgb):
 
 
 def test_level_change_is_gradual_on_capped_colour():
-    # Белый урезан масштабом до ~82 из 255; смена уровня всё равно должна идти так же плавно,
+    # Белый урезан масштабом примерно до 173 из 255; смена уровня всё равно должна идти так же плавно,
     # как на цвете без урезания, а не скачком за кадр-два.
     out = leds.Output()
     white = bytes((255,)) * (3 * N)

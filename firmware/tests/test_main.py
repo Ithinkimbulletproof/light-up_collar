@@ -144,7 +144,8 @@ def test_boots_on_usb_and_lights_up(monkeypatch, tmp_path):
     w = b.strip.writes
     assert len(w) > 100  # ~40 кадров в секунду
     assert lit(w[-2])  # последний кадр — гашение в finally при остановке теста
-    assert max(sum(f) for f in w) * config.MA_PER_CHANNEL // 255 + 63 <= config.USB_CAP_MA + 5
+    fixed = config.NUM_LEDS * config.MA_IDLE_PER_LED + config.I_ESP_MA
+    assert max(sum(f) for f in w) * config.MA_PER_CHANNEL // 255 + fixed <= config.USB_CAP_MA + 5
 
 
 def test_dark_until_battery_measured(monkeypatch, tmp_path):

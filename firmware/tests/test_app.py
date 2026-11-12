@@ -217,14 +217,15 @@ def test_lighter_colour_brightens_gradually_after_wipe(tmp_path):
     run_strip(a, out, 0, 160)
     a.on_button(button.SINGLE, 4000)
     frames = run_strip(a, out, 4000, 60)
-    assert max(frames[-1]) > 2 * max(frames[0])  # красный в итоге заметно ярче урезанного белого
+    assert max(frames[-1]) > max(frames[0]) * 4 // 3  # красный в итоге заметно ярче урезанного белого
     for prev, cur in zip(frames, frames[1:]):
         assert max(c - p for c, p in zip(cur, prev)) <= 255 * 25 // config.TRANSITION_MS + 2
 
 
-@pytest.mark.parametrize("palette", [3, 5, 6])  # зелёный → голубой, синий → фиолетовый, фиолетовый → белый
+@pytest.mark.parametrize("palette", [6])  # фиолетовый → белый: в потолок не влезает только белый
 def test_heavier_colour_dims_unreached_pixels_gradually(tmp_path, palette):
-    # Новый цвет тяжелее, масштаб падает: лента впереди перекраски темнеет плавно, а не за пару кадров.
+    # Новый цвет тяжелее и не влезает в потолок, масштаб падает: лента впереди перекраски темнеет плавно,
+    # а не за пару кадров.
     import leds
 
     a = make(tmp_path)
@@ -235,6 +236,7 @@ def test_heavier_colour_dims_unreached_pixels_gradually(tmp_path, palette):
     a.on_button(button.SINGLE, 4000)
     frames = run_strip(a, out, 4000, config.COLOR_WIPE_MS // 25 - 1)
     series = [before] + [max(f[3 * (N - 1) :]) for f in frames]
+    assert series[-1] < series[0]  # масштаб действительно упал
     assert max(x - y for x, y in zip(series, series[1:])) <= 7
 
 
@@ -253,7 +255,20 @@ def test_scene_current_during_wipe_is_the_heavier_colour(tmp_path):
         assert a.ref_ma is None
 
 
-@pytest.mark.parametrize("gap", [420, 450, 475])
+def test_scene_current_during_charge_is_the_whole_bar(tmp_path):
+    # Пока шкала бежит, масштаб считается от всей шкалы, а не от уже горящей её части.
+    import leds
+
+    a = make(tmp_path)
+    hold(a, 4000 - config.LONG_PRESS_MS)
+    a.render(4000)  # шкала только начала бежать: горит первый пиксель
+    whole = modes.new_frame()
+    modes.charge_bar(whole, a.mon.percent)
+    assert a.ref_ma == leds.leds_ma(whole)
+    assert a.ref_ma > leds.leds_ma(a.frame)
+
+
+@pytest.mark.parametrize("gap", [400, 425, 450])
 def test_second_press_mid_wipe_keeps_unreached_pixels_flat(tmp_path, gap):
     # Быстрые нажатия подряд: белый хвост, до которого не дошла первая перекраска, не разгорается.
     import leds
@@ -267,6 +282,7 @@ def test_second_press_mid_wipe_keeps_unreached_pixels_flat(tmp_path, gap):
     a.on_button(button.SINGLE, 4000)
     frames = run_strip(a, out, 4000, gap // 25)
     t = 4000 + gap // 25 * 25
+    assert (t - 4000) * N // config.COLOR_WIPE_MS + 1 < N  # белый хвост ещё есть
     a.on_button(button.SINGLE, t)
     frames += run_strip(a, out, t, config.COLOR_WIPE_MS // 25 - 2)
     assert max(f[last] for f in frames) <= before + 1
@@ -295,7 +311,7 @@ def test_level_change_takes_transition_ms(tmp_path, before):
     assert close * 25 >= 250
 
 
-@pytest.mark.parametrize("palette", [7, 4])
+@pytest.mark.parametrize("palette", [7])
 @pytest.mark.parametrize("level", [0, 1])
 @pytest.mark.parametrize("dismiss", [False, True])
 def test_no_overshoot_when_charge_display_ends(tmp_path, palette, level, dismiss):
@@ -307,6 +323,7 @@ def test_no_overshoot_when_charge_display_ends(tmp_path, palette, level, dismiss
     out = leds.Output()
     run_strip(a, out, 0, 160)
     steady = bytes(out.out)
+    assert out.scale < 256  # цвет урезан масштабом, иначе переброса не бывает
     hold(a, 4000 - config.LONG_PRESS_MS)
     bar = run_strip(a, out, 4000, 80)[-1]
     end = 6000
@@ -334,7 +351,11 @@ def test_colour_returns_gradually_after_charge_display(tmp_path):
     assert out.out[last] == 0
     a.on_button(button.PRESS, 6000)
     series = [0] + [f[last] for f in run_strip(a, out, 6000, 30)]
-    assert max(y - x for x, y in zip(series, series[1:])) <= 7
+    # Плавность — 255 за TRANSITION_MS в единицах уровня; на ленте это та же доля от итоговой яркости.
+    level = 255 * config.BRIGHTNESS_LEVELS[1] // 100
+    allowed = (255 * 25 // config.TRANSITION_MS) * series[-1] // level + 2
+    assert series[-1] > 0
+    assert max(y - x for x, y in zip(series, series[1:])) <= allowed
 
 
 @pytest.mark.parametrize("level", [0, 1])
@@ -358,7 +379,9 @@ def test_no_overshoot_after_low_flash(tmp_path, level):
 
 def test_charge_bar_fill_without_flare(tmp_path):
     # Шкала бежит при пониженном потолке и тусклом уровне: первые пиксели не вспыхивают выше,
-    # чем горят, когда шкала добежала.
+    # чем горят, когда шкала добежала. При 16 светодиодах шкала целиком влезает в номинальный потолок,
+    # масштаб тут не включается; что он считается от всей шкалы, проверяет
+    # test_scene_current_during_charge_is_the_whole_bar.
     import leds
 
     a = make(tmp_path)

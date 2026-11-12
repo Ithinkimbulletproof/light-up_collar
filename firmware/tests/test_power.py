@@ -6,6 +6,7 @@ from battery import SOURCE_BATTERY, SOURCE_NONE, SOURCE_USB, STARTUP_SAMPLES, Ca
 
 FIXED = config.NUM_LEDS * config.MA_IDLE_PER_LED + config.I_ESP_MA
 FULL_WHITE_MA = config.NUM_LEDS * 3 * config.MA_PER_CHANNEL
+HEAVY_SCENE_MA = 2 * config.CAP_MA  # нагрузка выше потолка при любом числе светодиодов
 SAMPLE_MS = 250
 
 
@@ -42,9 +43,9 @@ def reversals(history):
 
 
 def breathing_white(t):
-    """Нагрузка, которая плавно гуляет 15–100 % каждые 4 с (показ заряда, вспышки, смена цвета)."""
+    """Нагрузка, которая плавно гуляет от 15 до 100 % тяжёлой сцены (вдвое выше потолка) каждые 4 с."""
     level = 0.15 + 0.85 * (0.5 - 0.5 * math.cos(2 * math.pi * (t % 4000) / 4000))
-    return int(FULL_WHITE_MA * level)
+    return int(HEAVY_SCENE_MA * level)
 
 
 # --- Monitor ---
@@ -64,7 +65,7 @@ def test_startup_on_good_battery():
 
 
 def test_low_needs_confirmation_and_has_hysteresis():
-    # Замеры под током покоя: V_rest = V + 113 мА × 0,25 Ом ≈ V + 28 мВ, поэтому берём с запасом.
+    # Замеры под током покоя (лента погашена): V_rest выше V всего на десяток милливольт, поэтому берём с запасом.
     mon = Monitor()
     t = feed(mon, 3900, 3000)
     t = feed(mon, config.V_LOW_MV - 80, 1000, t)
@@ -147,6 +148,7 @@ def test_sag_reduces_cap_and_settles():
 
 def test_breathing_does_not_make_cap_hunt():
     mon, cap, hist = simulate(lambda t: 3620, 250, breathing_white, 600)
+    assert min(hist) < config.CAP_MA  # потолок действительно двигался
     assert reversals(hist) <= 1
 
 

@@ -28,11 +28,14 @@ import settings  # noqa: E402
 
 OUT_DIR = os.path.join(ROOT, "docs", "images")
 FRAME_MS = 1000 // config.FPS
+GIF_EVERY = 2  # в GIF каждый второй кадр прошивки (50 мс): глазу хватает, а файл вдвое легче
 BATTERY_PERIOD_MS = 250
 BATTERY_OCV_MV = 3990  # батарея без нагрузки: ~80 %, шкала заряда зелёная
 
 N = config.NUM_LEDS
-PITCH = 20  # шаг светодиодов на картинке, px
+PITCH = max(20, 640 // N)  # шаг светодиодов на картинке, px: до 32 светодиодов лента занимает ~640 px, дальше — по 20 px на каждый
+CHIP = PITCH // 4  # половина размера светодиода
+GLOW = PITCH // 2  # радиус свечения
 PAD = 28
 W = PAD * 2 + PITCH * N
 H = 104
@@ -63,7 +66,7 @@ def to_screen(v):
 def draw(rgb_out, pressed, caption):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle((PAD - 14, STRIP_Y - 15, W - PAD + 14, STRIP_Y + 15), radius=15, fill=BAND)
+    d.rounded_rectangle((PAD - 14, STRIP_Y - CHIP - 8, W - PAD + 14, STRIP_Y + CHIP + 8), radius=CHIP + 8, fill=BAND)
 
     glow = Image.new("RGB", (W, H), (0, 0, 0))
     g = ImageDraw.Draw(glow)
@@ -73,18 +76,18 @@ def draw(rgb_out, pressed, caption):
         colors.append(c)
         x = PAD + PITCH * i + PITCH // 2
         if any(c):
-            g.ellipse((x - 13, STRIP_Y - 13, x + 13, STRIP_Y + 13), fill=tuple(v * 3 // 4 for v in c))
+            g.ellipse((x - GLOW, STRIP_Y - GLOW, x + GLOW, STRIP_Y + GLOW), fill=tuple(v * 3 // 4 for v in c))
     img = ImageChops.add(img, glow.filter(ImageFilter.GaussianBlur(9)))
 
     d = ImageDraw.Draw(img)
     for i, c in enumerate(colors):
         x = PAD + PITCH * i + PITCH // 2
         chip = tuple(max(a, b) for a, b in zip(c, CHIP_OFF))
-        d.rounded_rectangle((x - 5, STRIP_Y - 5, x + 5, STRIP_Y + 5), radius=2, fill=chip)
+        d.rounded_rectangle((x - CHIP, STRIP_Y - CHIP, x + CHIP, STRIP_Y + CHIP), radius=2, fill=chip)
         if any(c):
             lum = max(c) / 255
             core = tuple(round(v + (255 - v) * 0.55 * lum) for v in c)
-            d.rounded_rectangle((x - 2, STRIP_Y - 2, x + 2, STRIP_Y + 2), radius=1, fill=core)
+            d.rounded_rectangle((x - CHIP // 2, STRIP_Y - CHIP // 2, x + CHIP // 2, STRIP_Y + CHIP // 2), radius=1, fill=core)
 
     # Кнопка и подпись под лентой.
     bx, by = PAD + 6, H - 24
@@ -107,12 +110,12 @@ def simulate(name, presses, captions, duration_ms, skip_ms=0, palette=0, level=N
     b = button.Button()
     out = leds.Output()
 
-    frames, durations = [], []
+    frames = []
     now = 0
     t_frame = 0
     t_batt = -BATTERY_PERIOD_MS
     t_ready = None  # на плате это первые ~2 с после включения: замеры батареи при тёмной ленте
-    last_frame_at = None
+    frame_no = 0
     while t_ready is None or now - t_ready < duration_ms:
         rel = None if t_ready is None else now - t_ready
         pressed = rel is not None and any(t0 <= rel < t0 + length for t0, length in presses)
@@ -133,23 +136,18 @@ def simulate(name, presses, captions, duration_ms, skip_ms=0, palette=0, level=N
             t_frame = now
             frame, bright, gain = a.render(now)
             rgb = out.step(frame, bright, gain, cap.cap, dt, a.ref_ma)
-            if rel is not None and rel >= skip_ms:
+            frame_no += 1
+            if rel is not None and rel >= skip_ms and frame_no % GIF_EVERY == 0:
                 caption = ""
                 for t0, text in captions:
                     if rel >= t0:
                         caption = text
                 frames.append(draw(rgb, b.pressed, caption))
-                if last_frame_at is not None:
-                    durations.append(now - last_frame_at)
-                last_frame_at = now
 
         now += config.BUTTON_POLL_MS
 
-    durations.append(FRAME_MS)
-    # В GIF время — в сотых долях секунды: 25 мс записываем как 20 и 30 по очереди.
-    gif_durations = [20 if k % 2 == 0 else 30 for k in range(len(durations))]
     path = os.path.join(OUT_DIR, name)
-    frames[0].save(path, save_all=True, append_images=frames[1:], duration=gif_durations, loop=0, optimize=True)
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=FRAME_MS * GIF_EVERY, loop=0, optimize=True)
     print("{}: {} кадров, {} КБ".format(path, len(frames), os.path.getsize(path) // 1024))
 
 
